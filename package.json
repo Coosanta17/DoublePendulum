@@ -1,0 +1,16 @@
+{
+  "name": "double_pendulum_map",
+  "version": "0.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0",
+    "typescript": "^5.0.0",
+    "@webgpu/types": "^0.1.0"
+  },
+  "dependencies": {}
+}
