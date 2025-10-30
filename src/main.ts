@@ -4,7 +4,6 @@ import vertexShader from './shaders/vertex.wgsl?raw';
 import fragmentShader from './shaders/fragment.wgsl?raw';
 
 const CANVAS_SIZE = 1024;
-const SIMULATION_STEPS = 500; // Number of RK4 steps per pixel
 const DT = 0.01; // Time step for RK4
 
 // Physical parameters
@@ -36,17 +35,21 @@ class DoublePendulumSimulation {
     private readonly previewCtx: CanvasRenderingContext2D;
     private selectedPixel: { x: number; y: number } | null = null;
     private previewInfo: HTMLElement;
+    private previewCoords: HTMLElement;
     private simulationTime = 0;
     private animationId: number | null = null;
+    private canvasWidth = CANVAS_SIZE;
+    private canvasHeight = CANVAS_SIZE;
 
     constructor() {
         this.canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
         this.previewCanvas = document.getElementById('preview-canvas') as HTMLCanvasElement;
         this.previewInfo = document.getElementById('preview-info') as HTMLElement;
+        this.previewCoords = document.getElementById('preview-coords') as HTMLElement;
         this.previewCtx = this.previewCanvas.getContext('2d')!;
 
-        this.canvas.width = CANVAS_SIZE;
-        this.canvas.height = CANVAS_SIZE;
+        this.canvas.width = this.canvasWidth;
+        this.canvas.height = this.canvasHeight;
         this.previewCanvas.width = 256;
         this.previewCanvas.height = 256;
     }
@@ -75,12 +78,15 @@ class DoublePendulumSimulation {
         this.setupPipelines(format);
         this.setupEventListeners();
 
-        // Select a random pixel initially
-        this.selectRandomPixel();
+        // Select center pixel initially
+        this.selectedPixel = {
+            x: Math.floor(this.canvasWidth / 2),
+            y: Math.floor(this.canvasHeight / 2)
+        };
+        this.updatePreviewCoords();
 
-        // Run the compute shader once
-        this.runCompute();
-        this.render();
+        // Start animation loop
+        this.startAnimation();
     }
 
     private setupResources() {
@@ -91,36 +97,37 @@ class DoublePendulumSimulation {
             usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
         });
 
-        // Create uniform buffer
-        const uniformData = new Float32Array([
-            CANVAS_SIZE, CANVAS_SIZE, SIMULATION_STEPS, DT,
-            M1, M2, L1, L2, G, 0, 0, 0 // padding for alignment to 48 bytes
-        ]);
-
+        // Create uniform buffer with time field
         this.uniformBuffer = this.device.createBuffer({
-            size: 48, // round up to multiple of 16 for uniform buffer alignment
+            size: 64, // increased for time field + padding
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
         });
-        // Build an ArrayBuffer matching the WGSL Params layout: u32 width,height,steps; f32 dt,m1,m2,l1,l2,g; padding
-        const uniformBuf = new ArrayBuffer(48);
-        const dv = new DataView(uniformBuf);
-        dv.setUint32(0, CANVAS_SIZE, true); // width
-        dv.setUint32(4, CANVAS_SIZE, true); // height
-        dv.setUint32(8, SIMULATION_STEPS, true); // steps
-        dv.setFloat32(12, DT, true); // dt
-        dv.setFloat32(16, M1, true);
-        dv.setFloat32(20, M2, true);
-        dv.setFloat32(24, L1, true);
-        dv.setFloat32(28, L2, true);
-        dv.setFloat32(32, G, true);
-        // remaining 16 bytes are padding (zeros)
-        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformBuf);
+
+        // Initialize with time = 0
+        this.updateUniforms(0);
 
         // Create sampler
         this.sampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
         });
+    }
+
+    private updateUniforms(time: number) {
+        // Build an ArrayBuffer matching the WGSL Params layout: u32 width,height,steps; f32 dt,m1,m2,l1,l2,g,time
+        const uniformBuf = new ArrayBuffer(64);
+        const dv = new DataView(uniformBuf);
+        dv.setUint32(0, CANVAS_SIZE, true); // width
+        dv.setUint32(4, CANVAS_SIZE, true); // height
+        dv.setUint32(8, 0, true); // steps (not used anymore)
+        dv.setFloat32(12, DT, true); // dt
+        dv.setFloat32(16, M1, true);
+        dv.setFloat32(20, M2, true);
+        dv.setFloat32(24, L1, true);
+        dv.setFloat32(28, L2, true);
+        dv.setFloat32(32, G, true);
+        dv.setFloat32(36, time, true); // time
+        this.device.queue.writeBuffer(this.uniformBuffer, 0, uniformBuf);
     }
 
     private setupPipelines(format: GPUTextureFormat) {
@@ -344,41 +351,35 @@ class DoublePendulumSimulation {
         ctx.fill();
     }
 
-    private async animatePreview(initialState: DoublePendulumState) {
-        let state = {...initialState};
+    private async updatePreviewFromGPU() {
+        if (!this.selectedPixel) return;
+
+        const state = await this.getPixelState(this.selectedPixel.x, this.selectedPixel.y);
+        this.drawPendulum(state);
+    }
+
+    private startAnimation() {
         const startTime = performance.now();
 
-        const animate = () => {
-            // RK4 step
-            const k1 = this.derivatives(state);
-            const k2 = this.derivatives({
-                theta1: state.theta1 + 0.5 * DT * k1.dtheta1,
-                theta2: state.theta2 + 0.5 * DT * k1.dtheta2,
-                omega1: state.omega1 + 0.5 * DT * k1.domega1,
-                omega2: state.omega2 + 0.5 * DT * k1.domega2,
-            });
-            const k3 = this.derivatives({
-                theta1: state.theta1 + 0.5 * DT * k2.dtheta1,
-                theta2: state.theta2 + 0.5 * DT * k2.dtheta2,
-                omega1: state.omega1 + 0.5 * DT * k2.domega1,
-                omega2: state.omega2 + 0.5 * DT * k2.domega2,
-            });
-            const k4 = this.derivatives({
-                theta1: state.theta1 + DT * k3.dtheta1,
-                theta2: state.theta2 + DT * k3.dtheta2,
-                omega1: state.omega1 + DT * k3.domega1,
-                omega2: state.omega2 + DT * k3.domega2,
-            });
-
-            state.theta1 += DT * (k1.dtheta1 + 2 * k2.dtheta1 + 2 * k3.dtheta1 + k4.dtheta1) / 6;
-            state.theta2 += DT * (k1.dtheta2 + 2 * k2.dtheta2 + 2 * k3.dtheta2 + k4.dtheta2) / 6;
-            state.omega1 += DT * (k1.domega1 + 2 * k2.domega1 + 2 * k3.domega1 + k4.domega1) / 6;
-            state.omega2 += DT * (k1.domega2 + 2 * k2.domega2 + 2 * k3.domega2 + k4.domega2) / 6;
-
-            this.drawPendulum(state);
-
+        const animate = async () => {
             const elapsed = (performance.now() - startTime) / 1000;
             this.simulationTime = elapsed;
+
+            // Update uniforms with current time
+            this.updateUniforms(elapsed);
+
+            // Run compute shader
+            this.runCompute();
+
+            // Render to canvas
+            this.render();
+
+            // Update preview from GPU state
+            if (this.selectedPixel) {
+                await this.updatePreviewFromGPU();
+            }
+
+            // Update UI
             document.getElementById('simTime')!.textContent = elapsed.toFixed(2);
 
             this.animationId = requestAnimationFrame(animate);
@@ -387,71 +388,54 @@ class DoublePendulumSimulation {
         animate();
     }
 
-    private derivatives(state: DoublePendulumState) {
-        const delta = state.theta2 - state.theta1;
-        const den1 = (M1 + M2) * L1 - M2 * L1 * Math.cos(delta) * Math.cos(delta);
-        const den2 = (L2 / L1) * den1;
-
-        const dtheta1 = state.omega1;
-        const dtheta2 = state.omega2;
-
-        const domega1 = (M2 * L1 * state.omega1 * state.omega1 * Math.sin(delta) * Math.cos(delta) +
-            M2 * G * Math.sin(state.theta2) * Math.cos(delta) +
-            M2 * L2 * state.omega2 * state.omega2 * Math.sin(delta) -
-            (M1 + M2) * G * Math.sin(state.theta1)) / den1;
-
-        const domega2 = (-M2 * L2 * state.omega2 * state.omega2 * Math.sin(delta) * Math.cos(delta) +
-            (M1 + M2) * G * Math.sin(state.theta1) * Math.cos(delta) -
-            (M1 + M2) * L1 * state.omega1 * state.omega1 * Math.sin(delta) -
-            (M1 + M2) * G * Math.sin(state.theta2)) / den2;
-
-        return {dtheta1, dtheta2, domega1, domega2};
-    }
-
     private setupEventListeners() {
         this.canvas.addEventListener('click', async (e) => {
             const rect = this.canvas.getBoundingClientRect();
             const x = Math.floor((e.clientX - rect.left) * CANVAS_SIZE / rect.width);
             const y = Math.floor((e.clientY - rect.top) * CANVAS_SIZE / rect.height);
 
-            this.selectedPixel = {x, y};
-            await this.updatePreview();
+            this.selectedPixel = { x, y };
+            this.updatePreviewCoords();
         });
 
         document.getElementById('reset')!.addEventListener('click', () => {
-            this.selectRandomPixel();
+            this.resetSimulation();
+        });
+
+        window.addEventListener('resize', () => {
+            this.handleResize();
         });
     }
 
-    private selectRandomPixel() {
-        const x = Math.floor(Math.random() * CANVAS_SIZE);
-        const y = Math.floor(Math.random() * CANVAS_SIZE);
-        this.selectedPixel = {x, y};
-        this.updatePreview();
-    }
-
-    private async updatePreview() {
-        if (!this.selectedPixel) return;
-
-        if (this.animationId !== null) {
-            cancelAnimationFrame(this.animationId);
+    private updatePreviewCoords() {
+        if (!this.selectedPixel) {
+            this.previewCoords.style.display = 'none';
+            return;
         }
 
+        this.previewCoords.style.display = 'block';
+        this.previewCoords.textContent = `(${this.selectedPixel.x}, ${this.selectedPixel.y})`;
         this.previewInfo.style.display = 'none';
+    }
+
+    private resetSimulation() {
+        // Reset simulation time but keep selected pixel
         this.simulationTime = 0;
+        this.updateUniforms(0);
+    }
 
-        const initialState = await this.getPixelState(this.selectedPixel.x, this.selectedPixel.y);
+    private handleResize() {
+        this.canvasWidth = window.innerWidth;
+        this.canvasHeight = window.innerHeight;
+        this.canvas.width = this.canvasWidth;
+        this.canvas.height = this.canvasHeight;
 
-        // Get the initial angles from pixel position
-        const theta1_init = (this.selectedPixel.x / CANVAS_SIZE * 2.0 - 1.0) * Math.PI;
-        const theta2_init = (this.selectedPixel.y / CANVAS_SIZE * 2.0 - 1.0) * Math.PI;
-
-        // Start animation from initial position
-        await this.animatePreview({
-            theta1: theta1_init,
-            theta2: theta2_init,
-            omega1: 0,
-            omega2: 0,
+        // Reconfigure context
+        const format = navigator.gpu.getPreferredCanvasFormat();
+        this.context.configure({
+            device: this.device,
+            format: format,
+            alphaMode: 'opaque',
         });
     }
 }

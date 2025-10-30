@@ -12,6 +12,7 @@ struct Params {
   l1: f32,
   l2: f32,
   g: f32,
+  time: f32,
 }
 
 @group(0) @binding(0) var<uniform> params: Params;
@@ -101,8 +102,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   var omega1 = 0.0;
   var omega2 = 0.0;
 
-  // Simulate using RK4
-  for (var i = 0u; i < params.steps; i++) {
+  // Simulate from t=0 to current time
+  let totalSteps = u32(params.time / params.dt);
+  for (var i = 0u; i < totalSteps; i++) {
     let state = rk4Step(theta1, theta2, omega1, omega2, params.dt);
     theta1 = state.x;
     theta2 = state.y;
