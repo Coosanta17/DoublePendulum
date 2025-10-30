@@ -429,4 +429,3 @@ class DoublePendulumSimulation {
         alert('WebGPU initialization failed. Make sure your browser supports WebGPU.');
     }
 })();
-
