@@ -1,130 +1,125 @@
-// compute.wgsl
-// RK4 integrator for independent double pendulums.
-// State per-pendulum: vec4<f32> = (theta1, theta2, omega1, omega2)
-// Writes updated state into dst[idx] and a color into a storage output texture.
-//
-// Bindings (group 0):
-// @binding(0) src states (read)
-// @binding(1) dst states (read_write)
-// @binding(2) output storage texture (write)
-// @binding(3) uniform params
+// Compute shader for double pendulum simulation
 
-struct SimParams {
-    dt: f32,
-    pad0: f32,
-    texWidth: u32,
-    texHeight: u32,
-    g: f32,
-    l1: f32,
-    l2: f32,
-    m1: f32,
-    m2: f32,
-    nPend: u32,
-    pad1: u32,
-    pad2: u32,
-    pad3: u32,
-};
+const PI: f32 = 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679;
 
-@group(0) @binding(3) var<uniform>params: SimParams;
-@group(0) @binding(0) var<storage, read > src: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read_write > dst: array<vec4<f32>>;
-@group(0) @binding(2) var outputTex: texture_storage_2d<rgba8unorm, write>;
-
-// derivative function: given state (theta1, theta2, omega1, omega2) -> (dtheta1, dtheta2, domega1, domega2)
-fn deriv(s: vec4<f32>) -> vec4 < f32 > {
-    let theta1 = s.x;
-    let theta2 = s.y;
-    let omega1 = s.z;
-    let omega2 = s.w;
-
-    let delta = theta2 - theta1;
-
-    let m1 = params.m1;
-    let m2 = params.m2;
-    let l1 = params.l1;
-    let l2 = params.l2;
-    let g = params.g;
-
-    let denom1 = l1 * (2.0 * m1 + m2 - m2 * cos(2.0 * delta));
-    let denom2 = l2 * (2.0 * m1 + m2 - m2 * cos(2.0 * delta));
-
-    // avoid division by zero by small epsilon
-    let eps = 1e-6;
-    let domega1 = (
-        -g * (2.0 * m1 + m2) * sin(theta1)
-        - m2 * g * sin(theta1 - 2.0 * theta2)
-        - 2.0 * sin(delta) * m2 * (omega2 * omega2 * l2 + omega1 * omega1 * l1 * cos(delta))
-    ) / max(denom1, eps);
-
-    let domega2 = (
-        2.0 * sin(delta) * (
-            omega1 * omega1 * l1 * (m1 + m2)
-            + g * (m1 + m2) * cos(theta1)
-            + omega2 * omega2 * l2 * m2 * cos(delta)
-        )
-    ) / max(denom2, eps);
-
-    return vec4<f32>(omega1, omega2, domega1, domega2);
+struct Params {
+  width: u32,
+  height: u32,
+  steps: u32,
+  dt: f32,
+  m1: f32,
+  m2: f32,
+  l1: f32,
+  l2: f32,
+  g: f32,
 }
 
-// simple HSV->RGB helper: h in [0,1], s,v in [0,1]
-fn hsv_to_rgb(h: f32, s: f32, v: f32) -> vec3 < f32 > {
-    let i = floor(h * 6.0);
-    let f = h * 6.0 - i;
-    let p = v * (1.0 - s);
-    let q = v * (1.0 - f * s);
-    let t = v * (1.0 - (1.0 - f) * s);
-    let mod6 = i % 6.0;
-    if(mod6 == 0.0) {
-    return vec3<f32>(v, t, p);
-} else if (mod6 == 1.0) {
-    return vec3<f32>(q, v, p);
-} else if (mod6 == 2.0) {
-    return vec3<f32>(p, v, t);
-} else if (mod6 == 3.0) {
-    return vec3<f32>(p, q, v);
-} else if (mod6 == 4.0) {
-    return vec3<f32>(t, p, v);
+@group(0) @binding(0) var<uniform> params: Params;
+@group(0) @binding(1) var outputTexture: texture_storage_2d<rgba8unorm, write>;
+
+// Double pendulum derivatives
+fn derivatives(theta1: f32, theta2: f32, omega1: f32, omega2: f32) -> vec4f {
+  let m1 = params.m1;
+  let m2 = params.m2;
+  let l1 = params.l1;
+  let l2 = params.l2;
+  let g = params.g;
+
+  let delta = theta2 - theta1;
+  let den1 = (m1 + m2) * l1 - m2 * l1 * cos(delta) * cos(delta);
+  let den2 = (l2 / l1) * den1;
+
+  let dtheta1 = omega1;
+  let dtheta2 = omega2;
+
+  let domega1 = (m2 * l1 * omega1 * omega1 * sin(delta) * cos(delta) +
+                 m2 * g * sin(theta2) * cos(delta) +
+                 m2 * l2 * omega2 * omega2 * sin(delta) -
+                 (m1 + m2) * g * sin(theta1)) / den1;
+
+  let domega2 = (-m2 * l2 * omega2 * omega2 * sin(delta) * cos(delta) +
+                 (m1 + m2) * g * sin(theta1) * cos(delta) -
+                 (m1 + m2) * l1 * omega1 * omega1 * sin(delta) -
+                 (m1 + m2) * g * sin(theta2)) / den2;
+
+  return vec4f(dtheta1, dtheta2, domega1, domega2);
 }
-return vec3<f32>(v, p, q);
+
+// RK4 integration step
+fn rk4Step(theta1: f32, theta2: f32, omega1: f32, omega2: f32, dt: f32) -> vec4f {
+  let k1 = derivatives(theta1, theta2, omega1, omega2);
+  let k2 = derivatives(
+    theta1 + 0.5 * dt * k1.x,
+    theta2 + 0.5 * dt * k1.y,
+    omega1 + 0.5 * dt * k1.z,
+    omega2 + 0.5 * dt * k1.w
+  );
+  let k3 = derivatives(
+    theta1 + 0.5 * dt * k2.x,
+    theta2 + 0.5 * dt * k2.y,
+    omega1 + 0.5 * dt * k2.z,
+    omega2 + 0.5 * dt * k2.w
+  );
+  let k4 = derivatives(
+    theta1 + dt * k3.x,
+    theta2 + dt * k3.y,
+    omega1 + dt * k3.z,
+    omega2 + dt * k3.w
+  );
+
+  let dtheta1 = (k1.x + 2.0 * k2.x + 2.0 * k3.x + k4.x) / 6.0;
+  let dtheta2 = (k1.y + 2.0 * k2.y + 2.0 * k3.y + k4.y) / 6.0;
+  let domega1 = (k1.z + 2.0 * k2.z + 2.0 * k3.z + k4.z) / 6.0;
+  let domega2 = (k1.w + 2.0 * k2.w + 2.0 * k3.w + k4.w) / 6.0;
+
+  return vec4f(
+    theta1 + dt * dtheta1,
+    theta2 + dt * dtheta2,
+    omega1 + dt * domega1,
+    omega2 + dt * domega2
+  );
 }
 
-@compute @workgroup_size(256)
-fn main(@builtin(global_invocation_id) gid : vec3<u32>) {
-    let idx = gid.x;
-    if (idx >= params.nPend) {
-        return;
-    }
-    let s = src[idx];
+@compute @workgroup_size(16, 16)
+fn main(@builtin(global_invocation_id) global_id: vec3u) {
+  let x = global_id.x;
+  let y = global_id.y;
 
-    let dt = params.dt;
+  if (x >= params.width || y >= params.height) {
+    return;
+  }
 
-    // RK4
-    let k1 = deriv(s);
-    let s2 = s + 0.5 * dt * k1;
-    let k2 = deriv(s2);
-    let s3 = s + 0.5 * dt * k2;
-    let k3 = deriv(s3);
-    let s4 = s + dt * k3;
-    let k4 = deriv(s4);
+  // Map pixel coordinates to initial angles
+  // x -> theta1 range: [-PI, PI]
+  // y -> theta2 range: [-PI, PI]
+  let theta1_init = (f32(x) / f32(params.width) * 2.0 - 1.0) * PI;
+  let theta2_init = (f32(y) / f32(params.height) * 2.0 - 1.0) * PI;
 
-    let newS = s + (dt / 6.0) * (k1 + 2.0 * k2 + 2.0 * k3 + k4);
+  // Initial velocities are zero
+  var theta1 = theta1_init;
+  var theta2 = theta2_init;
+  var omega1 = 0.0;
+  var omega2 = 0.0;
 
-    dst[idx] = newS;
+  // Simulate using RK4
+  for (var i = 0u; i < params.steps; i++) {
+    let state = rk4Step(theta1, theta2, omega1, omega2, params.dt);
+    theta1 = state.x;
+    theta2 = state.y;
+    omega1 = state.z;
+    omega2 = state.w;
+  }
 
-    // write color mapping into output texture
-    // Map index -> pixel coords
-    let x = i32(idx % params.texWidth);
-    let y = i32(idx / params.texWidth);
+  // Normalize angles to [-PI, PI]
+  theta1 = theta1 - floor((theta1 + PI) / (2.0 * PI)) * 2.0 * PI;
+  theta2 = theta2 - floor((theta2 + PI) / (2.0 * PI)) * 2.0 * PI;
 
-    // color mapping: use combined angles for hue, speed for value
-    let ang = 0.5 * (newS.x + newS.y); // average angle
-    let hue = fract(ang * 0.15915494309189535); // / (2*pi)
-    let speed = length(vec2<f32>(newS.z, newS.w));
-    let sat = 0.8;
-    // scale speed to [0,1] with soft scaling
-    let value = clamp(speed * 0.06, 0.05, 1.0);
+  // Normalize to [0, 1] for visualization
+  let norm_theta1 = (theta1 / PI + 1.0) * 0.5;
+  let norm_theta2 = (theta2 / PI + 1.0) * 0.5;
+  let norm_omega1 = clamp((omega1 / 10.0 + 1.0) * 0.5, 0.0, 1.0);
+  let norm_omega2 = clamp((omega2 / 10.0 + 1.0) * 0.5, 0.0, 1.0);
 
-    let rgb = hsv_to_rgb(hue, sat, value);
-    textureStore(outputTex, vec2<i32>(x, y), vec4<f32>(rgb, 1.0));
+  // Write into an 8-bit UNORM storage texture; floats will be converted to 0..255 automatically.
+  textureStore(outputTexture, vec2u(x, y), vec4f(norm_theta1, norm_theta2, norm_omega1, norm_omega2));
 }
