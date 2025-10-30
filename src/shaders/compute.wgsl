@@ -1,5 +1,6 @@
 // Compute shader for double pendulum simulation
 
+// I do not care if fp32 can only handle at most 7 digits.
 const PI: f32 = 3.1415926535897932384626433832795028841971693993751058209749445923078164062862089986280348253421170679;
 
 struct Params {
@@ -93,6 +94,7 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   // Map pixel coordinates to initial angles
   // x -> theta1 range: [-PI, PI]
   // y -> theta2 range: [-PI, PI]
+  // 0° is vertically down (theta = 0)
   let theta1_init = (f32(x) / f32(params.width) * 2.0 - 1.0) * PI;
   let theta2_init = (f32(y) / f32(params.height) * 2.0 - 1.0) * PI;
 
@@ -122,6 +124,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3u) {
   let norm_omega1 = clamp((omega1 / 10.0 + 1.0) * 0.5, 0.0, 1.0);
   let norm_omega2 = clamp((omega2 / 10.0 + 1.0) * 0.5, 0.0, 1.0);
 
-  // Write into an 8-bit UNORM storage texture; floats will be converted to 0..255 automatically.
+  // Write color to texture
   textureStore(outputTexture, vec2u(x, y), vec4f(norm_theta1, norm_theta2, norm_omega1, norm_omega2));
 }

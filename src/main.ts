@@ -38,8 +38,6 @@ class DoublePendulumSimulation {
     private previewCoords: HTMLElement;
     private simulationTime = 0;
     private animationId: number | null = null;
-    private canvasWidth = CANVAS_SIZE;
-    private canvasHeight = CANVAS_SIZE;
 
     constructor() {
         this.canvas = document.getElementById('gpu-canvas') as HTMLCanvasElement;
@@ -48,8 +46,9 @@ class DoublePendulumSimulation {
         this.previewCoords = document.getElementById('preview-coords') as HTMLElement;
         this.previewCtx = this.previewCanvas.getContext('2d')!;
 
-        this.canvas.width = this.canvasWidth;
-        this.canvas.height = this.canvasHeight;
+        // Set canvas to fixed 1024x1024 size
+        this.canvas.width = CANVAS_SIZE;
+        this.canvas.height = CANVAS_SIZE;
         this.previewCanvas.width = 256;
         this.previewCanvas.height = 256;
     }
@@ -80,8 +79,8 @@ class DoublePendulumSimulation {
 
         // Select center pixel initially
         this.selectedPixel = {
-            x: Math.floor(this.canvasWidth / 2),
-            y: Math.floor(this.canvasHeight / 2)
+            x: Math.floor(CANVAS_SIZE / 2),
+            y: Math.floor(CANVAS_SIZE / 2)
         };
         this.updatePreviewCoords();
 
@@ -119,7 +118,7 @@ class DoublePendulumSimulation {
         const dv = new DataView(uniformBuf);
         dv.setUint32(0, CANVAS_SIZE, true); // width
         dv.setUint32(4, CANVAS_SIZE, true); // height
-        dv.setUint32(8, 0, true); // steps (not used anymore)
+        dv.setUint32(8, 0, true); // steps
         dv.setFloat32(12, DT, true); // dt
         dv.setFloat32(16, M1, true);
         dv.setFloat32(20, M2, true);
@@ -230,8 +229,8 @@ class DoublePendulumSimulation {
         passEncoder.setPipeline(this.computePipeline);
         passEncoder.setBindGroup(0, this.computeBindGroup);
         passEncoder.dispatchWorkgroups(
-            Math.ceil(CANVAS_SIZE / 8),
-            Math.ceil(CANVAS_SIZE / 8)
+            Math.ceil(CANVAS_SIZE / 16),
+            Math.ceil(CANVAS_SIZE / 16)
         );
         passEncoder.end();
 
@@ -264,7 +263,7 @@ class DoublePendulumSimulation {
     private async getPixelState(x: number, y: number): Promise<DoublePendulumState> {
         // Read pixel data from GPU
         const bytesPerPixel = 4; // rgba8unorm
-        const bytesPerRow = CANVAS_SIZE * bytesPerPixel; // must be multiple of 256; 512*4=2048
+        const bytesPerRow = CANVAS_SIZE * bytesPerPixel; // must be multiple of 256; 1024*4=4096
         const bufferSize = bytesPerRow * CANVAS_SIZE;
         const buffer = this.device.createBuffer({
             size: bufferSize,
@@ -394,16 +393,12 @@ class DoublePendulumSimulation {
             const x = Math.floor((e.clientX - rect.left) * CANVAS_SIZE / rect.width);
             const y = Math.floor((e.clientY - rect.top) * CANVAS_SIZE / rect.height);
 
-            this.selectedPixel = { x, y };
+            this.selectedPixel = {x, y};
             this.updatePreviewCoords();
         });
 
         document.getElementById('reset')!.addEventListener('click', () => {
             this.resetSimulation();
-        });
-
-        window.addEventListener('resize', () => {
-            this.handleResize();
         });
     }
 
@@ -423,21 +418,6 @@ class DoublePendulumSimulation {
         this.simulationTime = 0;
         this.updateUniforms(0);
     }
-
-    private handleResize() {
-        this.canvasWidth = window.innerWidth;
-        this.canvasHeight = window.innerHeight;
-        this.canvas.width = this.canvasWidth;
-        this.canvas.height = this.canvasHeight;
-
-        // Reconfigure context
-        const format = navigator.gpu.getPreferredCanvasFormat();
-        this.context.configure({
-            device: this.device,
-            format: format,
-            alphaMode: 'opaque',
-        });
-    }
 }
 
 (async () => {
@@ -449,3 +429,4 @@ class DoublePendulumSimulation {
         alert('WebGPU initialization failed. Make sure your browser supports WebGPU.');
     }
 })();
+
